@@ -1,6 +1,6 @@
 /**
  * SkyCast Weather & Air Quality Dashboard
- * Frontend logic for search, rendering, and geolocation.
+ * Static frontend — calls Nominatim and Open-Meteo APIs directly from the browser.
  */
 
 const searchInput = document.getElementById("city-input");
@@ -100,7 +100,6 @@ function getWeatherIconSVG(icon, isDay) {
   return weatherIcons.unknown;
 }
 
-// Small forecast icons (simpler, no animations)
 const smallIcons = {
   sunny: '<svg viewBox="0 0 40 40" class="forecast-icon"><circle cx="20" cy="20" r="12" fill="#F59E0B" opacity="0.8"/></svg>',
   cloudy: '<svg viewBox="0 0 40 40" class="forecast-icon"><circle cx="14" cy="22" r="10" fill="#CBD5E1"/><circle cx="24" cy="20" r="11" fill="#94A3B8"/><circle cx="18" cy="17" r="8" fill="#F59E0B" opacity="0.5"/></svg>',
@@ -111,7 +110,6 @@ const smallIcons = {
   unknown: '<svg viewBox="0 0 40 40" class="forecast-icon"><circle cx="20" cy="20" r="12" stroke="#94A3B8" stroke-width="3" fill="none"/><text x="20" y="25" text-anchor="middle" font-size="12" fill="#94A3B8">?</text></svg>'
 };
 
-// ===== Detail Icons =====
 const detailIcons = {
   humidity: '<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 3c-4 6-8 10-8 14a8 8 0 0016 0c0-4-4-8-8-14z"/><circle cx="12" cy="17" r="2" fill="currentColor"/></svg>',
   wind: '<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 15h10a4 4 0 000-8H2"/><path d="M2 7h16a4 4 0 010 8h-4"/></svg>',
@@ -123,13 +121,163 @@ const detailIcons = {
   feels_like: '<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 14.76V3.5a2.5 2.5 0 00-5 0v11.26a4.5 4.5 0 105 0z"/></svg>',
 };
 
-// ===== API Calls =====
-async function fetchWeather(query) {
-  const url = `/api/weather?${query}`;
+// ===== WMO weather code mapping =====
+const WMO_CODES = {
+  0: ["Clear sky", "sunny"],
+  1: ["Mainly clear", "sunny"],
+  2: ["Partly cloudy", "cloudy"],
+  3: ["Overcast", "cloudy"],
+  45: ["Foggy", "fog"],
+  48: ["Depositing rime fog", "fog"],
+  51: ["Light drizzle", "rain"],
+  53: ["Moderate drizzle", "rain"],
+  55: ["Dense drizzle", "rain"],
+  61: ["Slight rain", "rain"],
+  63: ["Moderate rain", "rain"],
+  65: ["Heavy rain", "rain"],
+  71: ["Slight snow", "snow"],
+  73: ["Moderate snow", "snow"],
+  75: ["Heavy snow", "snow"],
+  77: ["Snow grains", "snow"],
+  80: ["Slight rain showers", "rain"],
+  81: ["Moderate rain showers", "rain"],
+  82: ["Violent rain showers", "rain"],
+  85: ["Slight snow showers", "snow"],
+  86: ["Heavy snow showers", "snow"],
+  95: ["Thunderstorm", "storm"],
+  96: ["Thunderstorm with slight hail", "storm"],
+  99: ["Thunderstorm with heavy hail", "storm"],
+};
+
+function wmoDescription(code) {
+  return WMO_CODES[code] || ["Unknown", "unknown"];
+}
+
+function windDirection(degrees) {
+  const dirs = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+  return dirs[Math.round(degrees / 22.5) % 16];
+}
+
+// ===== Direct API calls (no backend needed) =====
+
+async function geocodeCity(query) {
+  const url = "https://nominatim.openstreetmap.org/search?" + new URLSearchParams({
+    q: query,
+    format: "json",
+    limit: "1",
+    addressdetails: "1",
+    "accept-language": "en",
+  });
   const resp = await fetch(url);
+  if (!resp.ok) throw new Error("Geocoding service unavailable");
+  const results = await resp.json();
+  if (!results.length) return null;
+
+  const loc = results[0];
+  const addr = loc.address || {};
+  return {
+    display_name: loc.display_name,
+    city: addr.city || addr.town || addr.village || addr.municipality || query,
+    country: addr.country || "",
+    country_code: (addr.country_code || "").toUpperCase(),
+    lat: parseFloat(loc.lat),
+    lon: parseFloat(loc.lon),
+  };
+}
+
+async function fetchWeatherData(lat, lon) {
+  const params = new URLSearchParams({
+    latitude: lat,
+    longitude: lon,
+    current: "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,rain,showers,snowfall,weather_code,cloud_cover,pressure_msl,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m",
+    daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,sunrise,sunset",
+    timezone: "auto",
+    forecast_days: "7",
+  });
+  const resp = await fetch("https://api.open-meteo.com/v1/forecast?" + params);
+  if (!resp.ok) throw new Error("Weather service unavailable");
   const data = await resp.json();
-  if (!resp.ok) throw new Error(data.error || "Unknown error");
-  return data;
+
+  const current = data.current;
+  const [desc, icon] = wmoDescription(current.weather_code);
+
+  const daily = [];
+  for (let i = 0; i < data.daily.time.length; i++) {
+    const dCode = data.daily.weather_code[i];
+    const [dDesc, dIcon] = wmoDescription(dCode);
+    daily.push({
+      date: data.daily.time[i],
+      weather_desc: dDesc,
+      weather_icon: dIcon,
+      temp_max: data.daily.temperature_2m_max[i],
+      temp_min: data.daily.temperature_2m_min[i],
+      precip_prob: data.daily.precipitation_probability_max[i],
+      wind_max: data.daily.wind_speed_10m_max[i],
+      sunrise: data.daily.sunrise[i],
+      sunset: data.daily.sunset[i],
+    });
+  }
+
+  return {
+    current: {
+      temperature: current.temperature_2m,
+      feels_like: current.apparent_temperature,
+      humidity: current.relative_humidity_2m,
+      is_day: !!current.is_day,
+      weather_code: current.weather_code,
+      weather_desc: desc,
+      weather_icon: icon,
+      cloud_cover: current.cloud_cover,
+      pressure: current.pressure_msl,
+      wind_speed: current.wind_speed_10m,
+      wind_direction: windDirection(current.wind_direction_10m),
+      wind_gusts: current.wind_gusts_10m,
+      precipitation: current.precipitation,
+      rain: current.rain,
+      showers: current.showers,
+      snowfall: current.snowfall,
+    },
+    daily: daily,
+    timezone: data.timezone || "UTC",
+  };
+}
+
+async function fetchAirQuality(lat, lon) {
+  const params = new URLSearchParams({
+    latitude: lat,
+    longitude: lon,
+    current: "european_aqi,us_aqi,pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,dust,uv_index",
+  });
+  const resp = await fetch("https://air-quality-api.open-meteo.com/v1/air-quality?" + params);
+  if (!resp.ok) throw new Error("Air quality service unavailable");
+  const data = await resp.json();
+  const c = data.current;
+
+  const eaqi = c.european_aqi != null ? c.european_aqi : -1;
+  let label, color;
+  if (eaqi < 0) { label = "N/A"; color = "#9ca3af"; }
+  else if (eaqi <= 20) { label = "Good"; color = "#22c55e"; }
+  else if (eaqi <= 40) { label = "Fair"; color = "#84cc16"; }
+  else if (eaqi <= 60) { label = "Moderate"; color = "#eab308"; }
+  else if (eaqi <= 80) { label = "Poor"; color = "#f97316"; }
+  else if (eaqi <= 100) { label = "Very Poor"; color = "#ef4444"; }
+  else { label = "Extremely Poor"; color = "#7c3aed"; }
+
+  return {
+    european_aqi: eaqi,
+    aqi_label: label,
+    aqi_color: color,
+    us_aqi: c.us_aqi,
+    pm10: c.pm10,
+    pm2_5: c.pm2_5,
+    co: c.carbon_monoxide,
+    no2: c.nitrogen_dioxide,
+    so2: c.sulphur_dioxide,
+    o3: c.ozone,
+    dust: c.dust,
+    uv_index: c.uv_index,
+  };
 }
 
 // ===== Render Functions =====
@@ -158,126 +306,139 @@ function renderCurrentWeather(loc, w) {
   const cur = w.current;
   const iconHtml = getWeatherIconSVG(cur.weather_icon, cur.is_day);
 
-  currentWeather.innerHTML = `
-    <div class="current-grid">
-      <div>
-        <div class="location-label">
-          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="6" r="3"/><path d="M8 1C5.2 1 3 3.7 3 6.5 3 11 8 15 8 15s5-4 5-8.5C13 3.7 10.8 1 8 1z"/></svg>
-          ${loc.city}${loc.country ? ", " + loc.country : ""}
-        </div>
-        <div class="temp-row">
-          <span class="temp-value">${Math.round(cur.temperature)}</span>
-          <span class="temp-unit">&deg;C</span>
-        </div>
-        <div class="weather-desc">${cur.weather_desc}</div>
-        <div class="feels-like">Feels like ${Math.round(cur.feels_like)}&deg;C</div>
-      </div>
-      <div>${iconHtml}</div>
-    </div>`;
+  currentWeather.innerHTML =
+    '<div class="current-grid">' +
+      '<div>' +
+        '<div class="location-label">' +
+          '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="6" r="3"/><path d="M8 1C5.2 1 3 3.7 3 6.5 3 11 8 15 8 15s5-4 5-8.5C13 3.7 10.8 1 8 1z"/></svg>' +
+          ' ' + loc.city + (loc.country ? ", " + loc.country : "") +
+        '</div>' +
+        '<div class="temp-row">' +
+          '<span class="temp-value">' + Math.round(cur.temperature) + '</span>' +
+          '<span class="temp-unit">&deg;C</span>' +
+        '</div>' +
+        '<div class="weather-desc">' + cur.weather_desc + '</div>' +
+        '<div class="feels-like">Feels like ' + Math.round(cur.feels_like) + '&deg;C</div>' +
+      '</div>' +
+      '<div>' + iconHtml + '</div>' +
+    '</div>';
 }
 
 function renderAirQuality(aq) {
-  airQualitySection.innerHTML = `
-    <div class="aq-header">
-      <h3 class="aq-title">Air Quality</h3>
-      <span class="aq-badge" style="background:${aq.aqi_color}">${aq.aqi_label}</span>
-    </div>
-    <div class="aq-grid">
-      <div class="aq-item">
-        <div class="aq-item-value">${aq.european_aqi >= 0 ? aq.european_aqi : "—"}</div>
-        <div class="aq-item-label">European AQI</div>
-      </div>
-      <div class="aq-item">
-        <div class="aq-item-value">${aq.pm2_5 != null ? Math.round(aq.pm2_5) : "—"}</div>
-        <div class="aq-item-label">PM2.5 &micro;g/m&sup3;</div>
-      </div>
-      <div class="aq-item">
-        <div class="aq-item-value">${aq.pm10 != null ? Math.round(aq.pm10) : "—"}</div>
-        <div class="aq-item-label">PM10 &micro;g/m&sup3;</div>
-      </div>
-      <div class="aq-item">
-        <div class="aq-item-value">${aq.uv_index != null ? Math.round(aq.uv_index) : "—"}</div>
-        <div class="aq-item-label">UV Index</div>
-      </div>
-      <div class="aq-item">
-        <div class="aq-item-value">${aq.o3 != null ? Math.round(aq.o3) : "—"}</div>
-        <div class="aq-item-label">Ozone &micro;g/m&sup3;</div>
-      </div>
-      <div class="aq-item">
-        <div class="aq-item-value">${aq.no2 != null ? Math.round(aq.no2) : "—"}</div>
-        <div class="aq-item-label">NO&sb2; &micro;g/m&sup3;</div>
-      </div>
-    </div>`;
+  airQualitySection.innerHTML =
+    '<div class="aq-header">' +
+      '<h3 class="aq-title">Air Quality</h3>' +
+      '<span class="aq-badge" style="background:' + aq.aqi_color + '">' + aq.aqi_label + '</span>' +
+    '</div>' +
+    '<div class="aq-grid">' +
+      '<div class="aq-item"><div class="aq-item-value">' + (aq.european_aqi >= 0 ? aq.european_aqi : "—") + '</div><div class="aq-item-label">European AQI</div></div>' +
+      '<div class="aq-item"><div class="aq-item-value">' + (aq.pm2_5 != null ? Math.round(aq.pm2_5) : "—") + '</div><div class="aq-item-label">PM2.5 µg/m³</div></div>' +
+      '<div class="aq-item"><div class="aq-item-value">' + (aq.pm10 != null ? Math.round(aq.pm10) : "—") + '</div><div class="aq-item-label">PM10 µg/m³</div></div>' +
+      '<div class="aq-item"><div class="aq-item-value">' + (aq.uv_index != null ? Math.round(aq.uv_index) : "—") + '</div><div class="aq-item-label">UV Index</div></div>' +
+      '<div class="aq-item"><div class="aq-item-value">' + (aq.o3 != null ? Math.round(aq.o3) : "—") + '</div><div class="aq-item-label">Ozone µg/m³</div></div>' +
+      '<div class="aq-item"><div class="aq-item-value">' + (aq.no2 != null ? Math.round(aq.no2) : "—") + '</div><div class="aq-item-label">NO₂ µg/m³</div></div>' +
+    '</div>';
 }
 
 function renderDetails(w) {
-  const c = w.current;
-  const cards = [
-    { icon: detailIcons.feels_like, value: `${Math.round(c.feels_like)}&deg;C`, label: "Feels Like" },
-    { icon: detailIcons.humidity, value: `${c.humidity}%`, label: "Humidity" },
-    { icon: detailIcons.wind, value: `${Math.round(c.wind_speed)} km/h`, label: `Wind ${c.wind_direction}` },
-    { icon: detailIcons.pressure, value: `${Math.round(c.pressure)} hPa`, label: "Pressure" },
-    { icon: detailIcons.cloud, value: `${c.cloud_cover}%`, label: "Cloud Cover" },
-    { icon: detailIcons.uv, value: `${c.wind_gusts ? Math.round(c.wind_gusts) : "—"} km/h`, label: "Wind Gusts" },
-    { icon: detailIcons.rain, value: `${c.precipitation} mm`, label: "Precipitation" },
-    { icon: detailIcons.visibility, value: c.snowfall > 0 ? `${c.snowfall} cm` : "0 cm", label: "Snowfall" },
+  var c = w.current;
+  var cards = [
+    { icon: detailIcons.feels_like, value: Math.round(c.feels_like) + "&deg;C", label: "Feels Like" },
+    { icon: detailIcons.humidity, value: c.humidity + "%", label: "Humidity" },
+    { icon: detailIcons.wind, value: Math.round(c.wind_speed) + " km/h", label: "Wind " + c.wind_direction },
+    { icon: detailIcons.pressure, value: Math.round(c.pressure) + " hPa", label: "Pressure" },
+    { icon: detailIcons.cloud, value: c.cloud_cover + "%", label: "Cloud Cover" },
+    { icon: detailIcons.uv, value: (c.wind_gusts ? Math.round(c.wind_gusts) : "—") + " km/h", label: "Wind Gusts" },
+    { icon: detailIcons.rain, value: c.precipitation + " mm", label: "Precipitation" },
+    { icon: detailIcons.visibility, value: c.snowfall > 0 ? c.snowfall + " cm" : "0 cm", label: "Snowfall" },
   ];
 
-  detailsGrid.innerHTML = cards
-    .map(
-      (d) => `
-    <div class="detail-card glass-card">
-      <div class="detail-icon">${d.icon}</div>
-      <div class="detail-value">${d.value}</div>
-      <div class="detail-label">${d.label}</div>
-    </div>`
-    )
-    .join("");
+  detailsGrid.innerHTML = cards.map(function(d) {
+    return '<div class="detail-card glass-card">' +
+      '<div class="detail-icon">' + d.icon + '</div>' +
+      '<div class="detail-value">' + d.value + '</div>' +
+      '<div class="detail-label">' + d.label + '</div>' +
+    '</div>';
+  }).join("");
 }
 
 function renderForecast(daily) {
-  const days = daily.slice(0, 7).map((d) => {
-    const date = new Date(d.date + "T12:00:00");
-    const dayName = date.toLocaleDateString("en-US", { weekday: "short" });
-    const dayDate = date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-    const icon = smallIcons[d.weather_icon] || smallIcons.unknown;
+  var days = daily.slice(0, 7).map(function(d) {
+    var date = new Date(d.date + "T12:00:00");
+    var dayName = date.toLocaleDateString("en-US", { weekday: "short" });
+    var dayDate = date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    var icon = smallIcons[d.weather_icon] || smallIcons.unknown;
 
-    return `
-      <div class="forecast-day">
-        <div class="forecast-day-name">${dayName}</div>
-        <div class="forecast-day-date">${dayDate}</div>
-        ${icon}
-        <div class="forecast-temps">
-          <span class="forecast-temp-max">${Math.round(d.temp_max)}&deg;</span>
-          <span class="forecast-temp-min"> ${Math.round(d.temp_min)}&deg;</span>
-        </div>
-        ${d.precip_prob ? `<div class="forecast-precip">${d.precip_prob}% rain</div>` : ""}
-      </div>`;
+    return '<div class="forecast-day">' +
+      '<div class="forecast-day-name">' + dayName + '</div>' +
+      '<div class="forecast-day-date">' + dayDate + '</div>' +
+      icon +
+      '<div class="forecast-temps">' +
+        '<span class="forecast-temp-max">' + Math.round(d.temp_max) + '&deg;</span>' +
+        '<span class="forecast-temp-min"> ' + Math.round(d.temp_min) + '&deg;</span>' +
+      '</div>' +
+      (d.precip_prob ? '<div class="forecast-precip">' + d.precip_prob + '% rain</div>' : "") +
+    '</div>';
   });
 
-  forecastSection.innerHTML = `
-    <h3 class="forecast-title">7-Day Forecast</h3>
-    <div class="forecast-scroll">${days.join("")}</div>`;
+  forecastSection.innerHTML =
+    '<h3 class="forecast-title">7-Day Forecast</h3>' +
+    '<div class="forecast-scroll">' + days.join("") + '</div>';
 }
 
-function renderAll(data) {
-  renderCurrentWeather(data.location, data.weather);
-  renderAirQuality(data.air_quality);
-  renderDetails(data.weather);
-  renderForecast(data.weather.daily);
+function renderAll(location, weather, airQuality) {
+  renderCurrentWeather(location, weather);
+  renderAirQuality(airQuality);
+  renderDetails(weather);
+  renderForecast(weather.daily);
 
   welcomeState.hidden = true;
   weatherContent.hidden = false;
 }
 
 // ===== Search Handler =====
-async function search(query) {
+async function searchByCity(cityName) {
   showLoading();
   try {
-    const data = await fetchWeather(query);
+    var location = await geocodeCity(cityName);
+    if (!location) {
+      hideLoading();
+      showError("Location '" + cityName + "' not found. Try a more specific name.");
+      return;
+    }
+    var [weather, air] = await Promise.all([
+      fetchWeatherData(location.lat, location.lon),
+      fetchAirQuality(location.lat, location.lon),
+    ]);
     hideLoading();
     hideError();
-    renderAll(data);
+    renderAll(location, weather, air);
+  } catch (err) {
+    hideLoading();
+    weatherContent.hidden = true;
+    welcomeState.hidden = true;
+    showError(err.message);
+  }
+}
+
+async function searchByCoords(lat, lon) {
+  showLoading();
+  try {
+    var location = {
+      display_name: lat.toFixed(2) + ", " + lon.toFixed(2),
+      city: lat.toFixed(2) + ", " + lon.toFixed(2),
+      country: "",
+      country_code: "",
+      lat: lat,
+      lon: lon,
+    };
+    var [weather, air] = await Promise.all([
+      fetchWeatherData(location.lat, location.lon),
+      fetchAirQuality(location.lat, location.lon),
+    ]);
+    hideLoading();
+    hideError();
+    renderAll(location, weather, air);
   } catch (err) {
     hideLoading();
     weatherContent.hidden = true;
@@ -287,18 +448,18 @@ async function search(query) {
 }
 
 function handleSearch() {
-  const value = searchInput.value.trim();
+  var value = searchInput.value.trim();
   if (!value) return;
-  search(`q=${encodeURIComponent(value)}`);
+  searchByCity(value);
 }
 
-searchInput.addEventListener("keydown", (e) => {
+searchInput.addEventListener("keydown", function(e) {
   if (e.key === "Enter") handleSearch();
 });
 searchBtn.addEventListener("click", handleSearch);
 
 // ===== Geolocation =====
-locateBtn.addEventListener("click", () => {
+locateBtn.addEventListener("click", function() {
   if (!navigator.geolocation) {
     showError("Geolocation is not supported by your browser.");
     return;
@@ -306,10 +467,10 @@ locateBtn.addEventListener("click", () => {
 
   showLoading();
   navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      search(`lat=${pos.coords.latitude}&lon=${pos.coords.longitude}`);
+    function(pos) {
+      searchByCoords(pos.coords.latitude, pos.coords.longitude);
     },
-    (err) => {
+    function(err) {
       hideLoading();
       if (err.code === 1) showError("Location access denied. Please allow location access or search by city name.");
       else if (err.code === 2) showError("Location unavailable. Please try again or search by city name.");
@@ -321,15 +482,10 @@ locateBtn.addEventListener("click", () => {
 });
 
 // ===== Sample Cities =====
-document.querySelectorAll(".sample-chip").forEach((chip) => {
-  chip.addEventListener("click", () => {
-    const city = chip.dataset.city;
+document.querySelectorAll(".sample-chip").forEach(function(chip) {
+  chip.addEventListener("click", function() {
+    var city = chip.dataset.city;
     searchInput.value = city;
-    search(`q=${encodeURIComponent(city)}`);
+    searchByCity(city);
   });
 });
-
-// ===== Load Vilnius by default on first visit =====
-// (kept commented - welcome screen shown instead)
-// Uncomment below to auto-load default city:
-// search('q=Vilnius');

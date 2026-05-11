@@ -1,41 +1,36 @@
 # SkyCast - Weather & Air Quality Dashboard
 
-Real-time weather and air quality dashboard built with Flask, Open-Meteo, and Nominatim APIs.
+Real-time weather and air quality dashboard built as a static site. Calls Open-Meteo and Nominatim APIs directly from the browser — no backend needed.
 
-## Architecture
+## How it works
 
 ```
-User → Flask App (app.py)
-         ├── Service A (services/geocoding.py) → Nominatim API
-         └── Service B (services/weather.py)    → Open-Meteo API
-                                                      ├── Weather Forecast
-                                                      └── Air Quality
+Browser (index.html + app.js)
+  ├── Nominatim API   → geocoding (city name → coordinates)
+  └── Open-Meteo API  → weather forecast + air quality
 ```
 
-### Service A: Geocoding
-Validates and resolves city names to coordinates via Nominatim (OpenStreetMap).
+No API keys required. Both APIs support CORS and are free to use.
 
-### Service B: Weather & Air Quality
-Fetches current weather, 7-day forecast, and air quality data via the free Open-Meteo API.
+## Run locally
 
-## Quick Start
+Open `index.html` in your browser, or serve with any static server:
 
 ```bash
-pip install -r requirements.txt
-python app.py
+python -m http.server 8000
+# or
+npx serve .
 ```
 
-Open http://localhost:5000
+Then open http://localhost:8000
 
-## Deploy to Render (Free Tier)
+## Deploy on GitHub Pages
 
 1. Push this repo to GitHub
-2. On Render.com, create a new **Web Service**
-3. Connect your GitHub repo
-4. Set:
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `gunicorn app:app -b 0.0.0.0:$PORT`
-5. Deploy
+2. Go to **Settings → Pages**
+3. Under **Branch**, select `master` (or `main`), folder: `/ (root)`
+4. Click **Save**
+5. Your site will be live at `https://YOUR_USERNAME.github.io/skycast-weather-dashboard/`
 
 ## APIs Used
 
